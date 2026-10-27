@@ -177,12 +177,17 @@ Ball flight measurement data available. May arrive in any order relative to othe
       "launch_azimuth": -1.3,
       "launch_elevation": 14.2,
       "carry_distance": "180.5m",
+      "carry_offline": "-7.6m",
       "total_distance": "195.0m",
+      "total_offline": "-8.4m",
       "roll_distance": "14.5m",
       "max_height": "28.3m",
       "flight_time": 6.2,
+      "descent_angle": 38.4,
       "backspin_rpm": 3200,
-      "sidespin_rpm": -450
+      "sidespin_rpm": -450,
+      "total_spin_rpm": 3231,
+      "spin_axis": -8.0
     }
   }
 }
@@ -196,12 +201,35 @@ Ball flight measurement data available. May arrive in any order relative to othe
 | `launch_azimuth` | degrees (float) | Horizontal launch angle. Positive = right of target |
 | `launch_elevation` | degrees (float) | Vertical launch angle above horizontal |
 | `carry_distance` | unit-tagged string | Carry distance (ball in air only) |
+| `carry_offline` | unit-tagged string | Lateral offset of the landing point from the target line. Positive = right of target |
 | `total_distance` | unit-tagged string | Total distance including roll |
+| `total_offline` | unit-tagged string | Lateral offset of the rest position from the target line. Positive = right of target |
 | `roll_distance` | unit-tagged string | Roll distance after landing |
 | `max_height` | unit-tagged string | Maximum apex height |
 | `flight_time` | float (seconds) | Time of flight (launch to landing) |
+| `descent_angle` | degrees (float) | Angle of descent below horizontal at landing |
 | `backspin_rpm` | integer (RPM) | Backspin component. Positive = backspin, negative = topspin |
 | `sidespin_rpm` | integer (RPM) | Sidespin component. Positive = curves ball rightward (slice for RH, hook for LH) |
+| `total_spin_rpm` | integer (RPM) | Total spin rate. Never negative |
+| `spin_axis` | degrees (float) | Tilt of the spin axis from horizontal. Positive = tilted right, curves ball rightward (same sense as `sidespin_rpm`) |
+
+`carry_offline` and `descent_angle` describe the landing of a ball in flight; devices omit them for a ball that does not leave the ground (e.g. a putt). `spin_axis` is omitted when `total_spin_rpm` is 0.
+
+**Spin.** `backspin_rpm` + `sidespin_rpm` and `total_spin_rpm` + `spin_axis` are two descriptions of the same spin:
+
+```
+backspin_rpm   = total_spin_rpm × cos(spin_axis)
+sidespin_rpm   = total_spin_rpm × sin(spin_axis)
+total_spin_rpm = √(backspin_rpm² + sidespin_rpm²)
+spin_axis      = atan2(sidespin_rpm, backspin_rpm)
+```
+
+- A device sends the pair it measures.
+- A device that sends `total_spin_rpm` and `spin_axis` should also send `backspin_rpm` and `sidespin_rpm`, computed as above. Many controllers read only the components.
+- A device that sends `backspin_rpm` and `sidespin_rpm` may also send `total_spin_rpm` and `spin_axis`.
+- A device derives one pair only from both values of the other pair. A device that measures backspin without sidespin sends `backspin_rpm` alone.
+- When both pairs are present, they must agree to within rounding.
+- A controller that receives one pair may compute the other.
 
 ---
 
@@ -229,7 +257,9 @@ Club head measurement data available. May arrive in any order relative to other 
       "swing_plane_horizontal": 5.3,
       "swing_plane_vertical": 58.1,
       "club_offset": "0.47in",
-      "club_height": "0.12in"
+      "club_height": "0.12in",
+      "spin_loft": 22.1,
+      "low_point_distance": "1.6in"
     }
   }
 }
@@ -250,6 +280,10 @@ Club head measurement data available. May arrive in any order relative to other 
 | `swing_plane_vertical` | degrees (float) | Vertical swing plane angle relative to ground |
 | `club_offset` | unit-tagged string | Lateral position of club head at impact relative to ball center. Positive = toward toe side |
 | `club_height` | unit-tagged string | Vertical position of club head at impact relative to ball center. Positive = above center |
+| `spin_loft` | degrees (float) | Angle between the club head's direction of travel and the face normal at impact, in three dimensions |
+| `low_point_distance` | unit-tagged string | Position of the lowest point of the club head's arc along the target line, relative to the ball. Positive = target side of the ball, negative = behind the ball |
+
+Devices send `spin_loft` only as a measured value. `dynamic_loft − attack_angle` approximates it but ignores club path and face angle; that approximation is left to controllers (see Derived Values).
 
 ---
 
@@ -409,6 +443,21 @@ Detection mode and handedness are informational and for optimization only. Devic
 
 ---
 
+## Derived Values
+
+Controllers commonly display values that follow exactly from FRP fields. FRP does not carry them as fields. This section is informative; it fixes the formulas and signs so controllers agree.
+
+| Value | Formula | Sign |
+|-------|---------|------|
+| Face to path | `face_angle − path` | Positive = face points right of the club path |
+| Curve | `carry_offline − carry_distance × tan(launch_azimuth)` | Positive = ball curved rightward in flight |
+| Roll offline | `total_offline − carry_offline` | Positive = ball rolled rightward |
+| Spin loft (approximate) | `dynamic_loft − attack_angle` | — |
+
+Distances are converted to a common unit before they are combined.
+
+---
+
 ## Unit-Tagged Strings
 
 All velocity and distance fields are **unit-tagged strings**: a numeric value immediately followed by a unit suffix, with no space.
@@ -440,6 +489,8 @@ This makes the unit unambiguous regardless of what system the sender or receiver
 Controllers must parse the suffix to interpret the value. Controllers must not assume a unit system. Devices should use the unit system native to their hardware and leave conversion to controllers or a conversion utility.
 
 **Angles** are always decimal degrees (float). **Spin** is always RPM (integer). Neither is unit-tagged.
+
+**Lateral signs** are absolute, independent of player handedness: positive = right of the target line, as seen from behind the ball looking at the target. This applies to `launch_azimuth`, `carry_offline`, `total_offline`, `sidespin_rpm`, `spin_axis`, `path` and `swing_plane_horizontal`.
 
 ---
 
@@ -485,7 +536,7 @@ on timeout (no shot_finished within N seconds):
 
 ## Versioning
 
-The protocol version follows **semver**. Breaking changes increment the major version. The controller proposes supported versions in `start` (`version` array). The device selects the highest mutually supported version and confirms it in `init` (`version` string). If no version is compatible, the device sends a `critical` alert and closes the connection.
+The protocol version follows **semver**. Breaking changes increment the major version. Adding an optional field to an existing event is not a breaking change: peers ignore unknown fields and handle missing optional fields (see Robustness). The controller proposes supported versions in `start` (`version` array). The device selects the highest mutually supported version and confirms it in `init` (`version` string). If no version is compatible, the device sends a `critical` alert and closes the connection.
 
 Version strings in the handshake are plain semver (e.g. `"0.1.0"`). They carry no draft, release-candidate, or status suffix — the maturity of a given version is out-of-band knowledge between implementations.
 
